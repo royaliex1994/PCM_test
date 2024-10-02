@@ -1,34 +1,34 @@
 #include <Arduino.h>
 
-// 定义四个控制继电器的GPIO引脚
-const int relayPins[] = {13, 12, 14, 27};  // 确保这些引脚支持GPIO输出
+// define 4 GPIO pins for relaies controlling
+const int relayPins[] = {13, 12, 14, 27};  // 
 
 void setup() {
-  Serial.begin(115200);  // 初始化串口通信
-  // 配置GPIO引脚为开漏输出并设置为高阻态（开漏模式下的默认“关闭”状态）
+  Serial.begin(115200);  // initial Serials communication 
+  // initialize pins to low state
   for (int i = 0; i < 4; i++) 
   {
     pinMode(relayPins[i], OUTPUT);
-    digitalWrite(relayPins[i], LOW); // 初始状态，继电器断开
+    digitalWrite(relayPins[i], LOW); 
   }
 }
 
 void loop() {
-  // 检查是否有串口数据
+  // check if the serials port get data
   if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');  // 读取一行数据
+    String command = Serial.readStringUntil('\n');  // read one line of the input string
 
-    // 根据接收到的命令控制继电器
+    // controlling the relaies according to the command
     for (int i = 0; i < 4; i++) {
       if (command == String("ON") + String(i)) 
       {
-        digitalWrite(relayPins[i], HIGH); // 开漏输出低电平，继电器吸合
-        delay(50);
+        digitalWrite(relayPins[i], HIGH); 
+        delay(100); // 100 ms pulse to switch relaies
         digitalWrite(relayPins[i], LOW);
       } 
       else if (command == String("OFF") + String(i)) 
       {
-        digitalWrite(relayPins[i], LOW); // 开漏输出高阻态，继电器断开
+        digitalWrite(relayPins[i], LOW); 
       }
     }
   }
