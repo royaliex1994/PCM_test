@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timedelta
 import serial
 from pyvisa.errors import VisaIOError
 
@@ -74,7 +74,7 @@ def connect_to_smu(resource_string):
     try:
         rm = visa.ResourceManager()
         smu = rm.open_resource(resource_string)  # Corrected to use the function parameter
-        smu.timeout = 10000  # Set the timeout to 60 seconds
+        smu.timeout = 100000  # Set the timeout to 60 seconds
         smu.write('*RST')  # Reset the instrument
         smu.write('*CLS')  # Clear the instrument
         print("SMU reset and cleared.")
@@ -199,8 +199,7 @@ def adjust_oscilloscope_scale(value, scale_type):
     - adjust_oscilloscope_scale(0.007, "voltage") will return 0.01.
     """
     # Define timebase and voltage scales arrays
-    timebase_scales = [1e-9, 2e-9, 5e-9, 1e-8, 2e-8, 5e-8, 1e-7, 2e-7, 5e-7, 1e-6,
-                       2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3]  # seconds/division
+    timebase_scales = [1e-7, 2e-7, 5e-7, 1e-6, 2e-6,5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3]  # seconds/division
     voltage_scales = [1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 5e-1, 1, 2, 5]  # volts/division
 
     # Select the appropriate scale array
@@ -226,7 +225,7 @@ def get_waveform_data(scope):
     - scope (visa.Resource): The oscilloscope object to query data from.
 
     Returns:
-    - tuple: Contains four numpy arrays, the first two are times and the second for voltages, corresponding to the waveform data.
+    - tuple: Contains two numpy arrays, the first for times and the second for voltages, corresponding to the waveform data.
 
     Raises:
     - ValueError: If there are issues parsing the preamble or data.
@@ -378,6 +377,7 @@ def get_smu_measurement(smu, params):
         smu.write(f"SOUR:SWE:STA {params['sweep_direction']}")
         smu.write("SOUR:SWE:RANG AUTO")
         smu.write("SENS:FUNC 'CURR','VOLT','RES'")
+        smu.write("SENS:CURR:RANG:AUTO:LLIM 1E-7")
         smu.write(f"SENS:CURR:NPLC {params['NPLC']}")
         smu.write(f"SENS:CURR:PROT {params['compliance_current']}")
         smu.write("SENS:CURR:RANG:AUTO:MODE RES")
@@ -393,7 +393,56 @@ def get_smu_measurement(smu, params):
         voltage = np.array(smu.query_ascii_values("FETC:ARR:VOLT?"))
         current = np.array(smu.query_ascii_values("FETC:ARR:CURR?"))
         resistance = np.array(smu.query_ascii_values("FETC:ARR:RES?"))
-        smu.write("OUTP OFF")
+        smu.write("OUTP1 OFF")
+        smu.write("*WAI")
+    except Exception as e:
+        raise RuntimeError(f"Failed to configure or fetch data from SMU: {e}")
+
+    return measure_time, source_voltage, voltage, current, resistance
+
+def get_smu_list_measurement(smu, params):
+    """
+    Configures the SMU for a voltage sweep according to specified parameters and fetches the measurement data.
+    Returns the data organized as NumPy arrays.
+
+    Parameters:
+    - smu (visa.Resource): The SMU device resource.
+    - params (dict): A dictionary containing configuration parameters for the SMU.
+
+    Returns:
+    - tuple of np.ndarray: Contains arrays for time, source voltage, voltage, current, and resistance.
+
+    Raises:
+    - ValueError: If required parameters are missing or if the directory does not exist.
+    - RuntimeError: If there is a failure in setting up the SMU or fetching the data.
+    """
+    try:
+        count = int(params['points'])
+        v = np.ones(count)*float(params['voltage'])
+        v_list = list(v)
+        v_str = ', '.join(f'{x}' for x in v_list)
+        smu.write("SOUR:FUNC VOLT")
+        smu.write("SOUR:VOLT:MODE LIST")
+        smu.write("SOUR:LIST:RANG AUTO")
+        smu.write(f"SOUR:LIST:VOLT {v_str}")
+        smu.write("SENS:FUNC 'CURR','VOLT','RES'")
+        smu.write("SENS:CURR:RANG:AUTO:LLIM 1E-7")
+        smu.write(f"SENS:CURR:NPLC {params['NPLC']}")
+        smu.write(f"SENS:CURR:PROT {params['compliance_current']}")
+        smu.write("SENS:CURR:RANG:AUTO:MODE RES")
+        smu.write("SENS:CURR:RANG:AUTO:THR 80")
+        smu.write("TRIG:SOUR AINT")
+
+        smu.write(f"TRIG:COUN {count}")
+
+        smu.write("INIT")
+        smu.write("*WAI")
+        measure_time = np.array(smu.query_ascii_values("FETC:ARR:TIME?"))
+        source_voltage = np.array(smu.query_ascii_values("FETC:ARR:SOUR?"))
+        voltage = np.array(smu.query_ascii_values("FETC:ARR:VOLT?"))
+        current = np.array(smu.query_ascii_values("FETC:ARR:CURR?"))
+        resistance = np.array(smu.query_ascii_values("FETC:ARR:RES?"))
+        smu.write("OUTP1 OFF")
         smu.write("*WAI")
     except Exception as e:
         raise RuntimeError(f"Failed to configure or fetch data from SMU: {e}")
@@ -407,23 +456,25 @@ def relays(ser, status):
 
     Args:
         ser (serial.Serial): The serial connection object.
-        status (str): The operation mode for the relays ('switch', 'measure', 'off').
+        status (str): The operation mode for the relays ('switch', 'measure').
 
     Raises:
         ValueError: If an unknown status is passed.
     """
     commands = {
-        'switch': ['ON0', 'OFF1', 'ON2', 'OFF3'],
-        'measure': ['OFF0', 'ON1', 'OFF2', 'ON3'],
-        'off': ['OFF0', 'OFF1', 'OFF2', 'OFF3']
+        'switch': ['ON0'],
+        'measure': ['ON1'],
+        'off':['OFF0']
     }
 
     if status not in commands:
         raise ValueError("Unknown status: '{}'".format(status))
-
-    command_string = '\n'.join(commands[status]) + '\n'
-    ser.write(command_string.encode())
-    print(f"Relay status set to '{status}' with commands: \n{command_string.strip()}")
+    
+    for command in commands[f'{status}']:
+        if status != 'off':
+            ser.write(command.encode())
+        print(f"Relay status set to '{status}' with {command}")
+        time.sleep(0.5)
 
 
 def trigger(scope, awg, timeout=0.2, poll_interval=0.05):
@@ -443,6 +494,7 @@ def trigger(scope, awg, timeout=0.2, poll_interval=0.05):
     while True:
         status = scope.query(":TER?").strip()
         if status == '+1':
+            time_0 = datetime.now()
             awg.enabled = False
             awg.write("OUTPut1:STATe 0")  # Ensure AWG is disabled
             break
@@ -450,7 +502,31 @@ def trigger(scope, awg, timeout=0.2, poll_interval=0.05):
         time_count += poll_interval
         if time_count > timeout:
             awg.trigger()  # Re-trigger AWG and reset time_count
+            time_0 = datetime.now()
             # time_count = 0
+    return time_0
+
+def trigger_endurance(scope, awg, timeout=0.2, poll_interval=0.05):
+    """
+    Polls the oscilloscope to check if a trigger has occurred and controls the AWG based on the status.
+
+    Parameters:
+    - scope (instrument): The oscilloscope instrument to query.
+    - awg (instrument): The arbitrary waveform generator to control.
+    - timeout (float): Timeout in seconds to attempt re-triggering the AWG if no trigger is detected.
+    - poll_interval (float): Time interval in seconds between status checks.
+
+    This function disables the AWG when the oscilloscope reports a successful trigger.
+    If the trigger isn't detected within a specified timeout, the AWG is triggered again.
+    """
+    time_count = 0
+    while True:
+        time.sleep(poll_interval)
+        time_count += poll_interval
+        if time_count > timeout:
+            awg.trigger()  # Re-trigger AWG and reset time_count
+            time.sleep(0.1)
+            break
 
 
 def measure_with_smu(smu, ser, params, filename):
@@ -473,16 +549,46 @@ def measure_with_smu(smu, ser, params, filename):
         measure_time, source_voltage, voltage, current, resistance = get_smu_measurement(smu, params)
         np.savez_compressed(filename, time=measure_time, source_voltage=source_voltage, voltage=voltage,
                             current=current, resistance=resistance)
-
+        
         # Calculate the average of the middle 10 resistance values
         mid_index = len(resistance) // 2
         middle_values = resistance[mid_index - 5:mid_index + 5]
         average_resistance = np.mean(middle_values)
+
         return average_resistance
     except Exception as e:
         print(f"An error occurred during SMU measurement: {e}")
         raise
 
+def measure_with_smu_list(smu, ser, params, filename):
+    """
+    Activates relays for measurement, configures the SMU based on provided parameters, and retrieves measurement data.
+
+    Parameters:
+    - smu (visa.Resource): The SMU device to be used for the measurements.
+    - params (dict): A dictionary containing parameters for the SMU configuration.
+
+    Returns:
+    - pandas.DataFrame: DataFrame containing the measurement data retrieved from the SMU.
+
+    Raises:
+    - Exception: Generic exceptions caught from underlying functions with an explanation.
+    """
+    try:
+        relays(ser, 'measure')
+        time_now = datetime.now()
+        measure_time, source_voltage, voltage, current, resistance = get_smu_list_measurement(smu, params)
+        np.savez_compressed(filename, time=measure_time, source_voltage=source_voltage, voltage=voltage,
+                            current=current, resistance=resistance)
+
+        # Calculate the average of the middle 10 resistance values
+        mid_index = len(resistance) // 2
+        middle_values = resistance[mid_index - 5:mid_index + 5]
+        average_resistance = np.mean(middle_values)
+        return average_resistance, time_now
+    except Exception as e:
+        print(f"An error occurred during SMU measurement: {e}")
+        raise
 
 def generate_filename(prefix, directory, extension=".csv"):
     """
@@ -542,3 +648,23 @@ def record_resistance(file_name, voltage, resistance, event):
     except Exception as e:
         print(f'Failed to record data: {e}')
 
+def generate_logscale_integers(n, m):
+    # Initially generate m points on a logarithmic scale
+    log_space = np.logspace(0, n, num=m, base=10)
+    # Convert the floating point numbers to integers and remove duplicates
+    integers = np.unique(np.round(log_space).astype(int))
+
+    # If the generated points are fewer than m, increase the number of points until the condition is met
+    jj = m
+    while len(integers) < m:
+        jj += 1
+        log_space = np.logspace(0, n, num=jj, base=10)
+        integers = np.unique(np.round(log_space).astype(int))
+
+    # Final sorted list of integers, ensuring there are m values
+    result = np.sort(integers[:m])
+
+    # Calculate the differences between consecutive integers
+    differences = np.diff(result)-1
+
+    return result, differences
